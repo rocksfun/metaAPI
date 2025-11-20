@@ -1,0 +1,5 @@
+metaapi-cloud-sdk>=11.0.0
+pandas
+numpy
+python-telegram-bot  # optional, for alerts
+requests
