@@ -56,10 +56,14 @@ def detect_fvg(df):
 
     if fvg_up.any():
         idx = fvg_up[fvg_up].index[-1]
-        bullish_fvg = (df.loc[idx, 'low'], df.loc[idx, 'high'].shift(2))  # bottom, top
+        # FVG: gap between candle 2 periods ago and current
+        if idx >= 2:
+            bullish_fvg = (df.loc[idx, 'low'], df.loc[idx-2, 'high'])  # bottom, top
     if fvg_down.any():
         idx = fvg_down[fvg_down].index[-1]
-        bearish_fvg = (df.loc[idx, 'high'].shift(2), df.loc[idx, 'high'])
+        # FVG: gap between candle 2 periods ago and current
+        if idx >= 2:
+            bearish_fvg = (df.loc[idx-2, 'low'], df.loc[idx, 'high'])
 
     return bullish_fvg, bearish_fvg
 
@@ -123,28 +127,30 @@ async def main_loop():
             bullish_fvg, bearish_fvg = detect_fvg(df)
             bull_div, bear_div = rsi_divergence(df)
 
-            price = quotes[0]['bid'] if 'sell' in locals() else quotes[0]['ask']
+            # Get current price - use ask for buy, bid for sell
+            current_ask = quotes[0]['ask']
+            current_bid = quotes[0]['bid']
 
             # === BULLISH SETUP ===
             if (sweep_low and bullish_fvg and 
-                bullish_fvg[0] <= price <= bullish_fvg[1] and
-                price >= detect_order_block(df, "buy") and
+                bullish_fvg[0] <= current_ask <= bullish_fvg[1] and
+                current_ask >= detect_order_block(df, "buy") and
                 bull_div and trades_today < MAX_TRADES_PER_DAY):
 
                 sl = daily_low - SL_BUFFER_PIPS * 0.1
-                tp = price + (price - sl) * RR_RATIO
-                await place_order("buy", price, sl, tp)
+                tp = current_ask + (current_ask - sl) * RR_RATIO
+                await place_order("buy", current_ask, sl, tp)
                 trades_today += 1
 
             # === BEARISH SETUP ===
             if (sweep_high and bearish_fvg and 
-                bearish_fvg[0] <= price <= bearish_fvg[1] and
-                price <= detect_order_block(df, "sell") and
+                bearish_fvg[0] <= current_bid <= bearish_fvg[1] and
+                current_bid <= detect_order_block(df, "sell") and
                 bear_div and trades_today < MAX_TRADES_PER_DAY):
 
                 sl = daily_high + SL_BUFFER_PIPS * 0.1
-                tp = price - (sl - price) * RR_RATIO
-                await place_order("sell", price, sl, tp)
+                tp = current_bid - (sl - current_bid) * RR_RATIO
+                await place_order("sell", current_bid, sl, tp)
                 trades_today += 1
 
             await asyncio.sleep(15)
@@ -154,7 +160,9 @@ async def main_loop():
             await asyncio.sleep(30)
 
 async def place_order(side, price, sl, tp):
-    risk_amount = account.get_balance() * (RISK_PERCENT / 100)
+    account_data = await account.get()
+    balance = account_data.get('balance', 10000)  # fallback to 10000 if balance not available
+    risk_amount = balance * (RISK_PERCENT / 100)
     pip_value = 1 if SYMBOL.endswith("USD") else 0.1
     distance = abs(price - sl)
     lots = risk_amount / (distance * 100)  # rough calc for XAU
@@ -170,12 +178,18 @@ async def place_order(side, price, sl, tp):
     logger.info(f"Trade placed: {side.upper()} SL:{sl} TP:{tp}")
 
     # Optional Telegram alert
-    if TELEGRAM_TOKEN:
-        import telegram
-        bot = telegram.Bot(TELEGRAM_TOKEN)
-        msg = f"🚀 {side.upper()} XAUUSD\nEntry: {price}\nSL: {sl}\nTP: {tp}\nRR: 1:3"
-        await bot.send_message(TELEGRAM_CHAT_ID, msg)
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            from telegram import Bot
+            bot = Bot(token=TELEGRAM_TOKEN)
+            msg = f"🚀 {side.upper()} XAUUSD\nEntry: {price}\nSL: {sl}\nTP: {tp}\nRR: 1:3"
+            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
+        except Exception as e:
+            logger.error(f"Failed to send Telegram message: {e}")
+
+async def main():
+    await init()
+    await main_loop()
 
 if __name__ == "__main__":
-    asyncio.run(init())
-    asyncio.run(main_loop())
+    asyncio.run(main())
